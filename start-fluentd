@@ -1,8 +1,12 @@
 #!/bin/sh
 
-ELASTICSEARCH_HOST=${ELASTICSEARCH_HOST:-es-logging.default.svc}
-ELASTICSEARCH_PORT=${ELASTICSEARCH_PORT:-9200}
-ELASTICSEARCH_SCHEME=${ELASTICSEARCH_SCHEME:-http}
+if [[ -n "${SUMOLOGIC_HOST}${SUMOLOGIC_ENDPOINT}" ]]; then
+    SUMOLOGIC_COLLECTOR="${SUMOLOGIC_HOST}${SUMOLOGIC_ENDPOINT}"
+else
+    ELASTICSEARCH_HOST=${ELASTICSEARCH_HOST:-es-logging.default.svc}
+    ELASTICSEARCH_PORT=${ELASTICSEARCH_PORT:-9200}
+    ELASTICSEARCH_SCHEME=${ELASTICSEARCH_SCHEME:-http}
+fi
 
 FLUENTD_FLUSH_INTERVAL=${FLUENTD_FLUSH_INTERVAL:-10s}
 FLUENTD_FLUSH_THREADS=${FLUENTD_FLUSH_THREADS:-4}
@@ -22,7 +26,70 @@ KUBERNETES_VERIFY_SSL=${KUBERNETES_VERIFY_SSL:-true}
 
 mkdir /etc/fluent
 
-cat << EOF >> /etc/fluent/fluent.conf
+if [[ -n "${SUMOLOGIC_COLLECTOR}" ]]; then 
+    cat << EOF >> /etc/fluent/fluent.conf
+# input plugin that exports metrics
+<source>
+  @type prometheus
+</source>
+
+# input plugin that collects metrics from MonitorAgent
+<source>
+  @type prometheus_monitor
+</source>
+
+<source>
+  @type tail
+  path /var/log/containers/*.log
+  pos_file /var/log/es-containers.log.pos
+  time_format %Y-%m-%dT%H:%M:%S.%N
+  tag kubernetes.*
+  format json
+  read_from_head true
+  keep_time_key true
+</source>
+
+<filter kubernetes.**>
+  @type kubernetes_metadata
+  kubernetes_url ${KUBERNETES_URL}
+  verify_ssl ${KUBERNETES_VERIFY_SSL}
+  preserve_json_log ${KUBERNETES_PRESERVE_JSON_LOG}
+</filter>
+
+<filter **>
+  @type prometheus
+
+  <metric>
+    name fluentd_records_total
+    type counter
+    desc The total number of records read by fluentd.
+  </metric>
+</filter>
+
+<match **>
+  type sumologic
+  host ${SUMOLOGIC_HOST}
+  port 443
+  format json|text
+  path ${SUMOLOGIC_PATH}
+
+  buffer_type ${FLUENTD_BUFFER_TYPE}
+  $([ "${FLUENTD_BUFFER_TYPE}" == "file" ] && echo buffer_path ${FLUENTD_BUFFER_PATH})
+  buffer_chunk_limit ${FLUENTD_BUFFER_CHUNK_LIMIT}
+  buffer_queue_limit ${FLUENTD_BUFFER_QUEUE_LIMIT}
+  flush_interval ${FLUENTD_FLUSH_INTERVAL}
+  retry_limit ${FLUENTD_RETRY_LIMIT}
+  $([ "${FLUENTD_DISABLE_RETRY_LIMIT}" == "true" ] && echo disable_retry_limit)
+  retry_wait ${FLUENTD_RETRY_WAIT}
+  max_retry_wait ${FLUENTD_MAX_RETRY_WAIT}
+  num_threads ${FLUENTD_FLUSH_THREADS}
+  logstash_format ${FLUENTD_LOGSTASH_FORMAT}
+  $([ -n "${FLUENTD_LOGSTASH_PREFIX}" ] && echo logstash_prefix ${FLUENTD_LOGSTASH_PREFIX})
+  reload_connections false
+EOF
+
+else
+    cat << EOF >> /etc/fluent/fluent.conf
 # input plugin that exports metrics
 <source>
   @type prometheus
